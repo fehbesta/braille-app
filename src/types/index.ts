@@ -159,6 +159,18 @@ export interface LocaleStrings {
     correctAnswers: string;
     currentStreak: string;
     accuracy: string;
+    sessionXP: string;
+    overallLevel: string;
+    practiceStreak: string;
+    continuousLabel: string;
+    readyForNext: string;
+    xpEarned: string;
+    difficulty: string;
+    beginner: string;
+    intermediate: string;
+    advanced: string;
+    difficultyUp: string;
+    nextDifficultyHint: string;
     answerLabel: string;
     answerPlaceholder: string;
     submit: string;

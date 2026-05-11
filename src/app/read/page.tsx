@@ -2,26 +2,57 @@
 
 import { FormEvent, useMemo, useState } from 'react';
 import { useLocaleContext } from '@/components/LocaleProvider';
-import { getReadingPracticeWords } from '@/data/readingPractice';
-import { dotsToBrailleUnicode } from '@/utils/brailleDisplay';
+import { getReadingPracticeWords, ReadingDifficulty } from '@/data/readingPractice';
+import { dotsToBrailleUnicode, getBrailleDisplayText } from '@/utils/brailleDisplay';
+import { useProgress } from '@/hooks/useProgress';
+import { useToast } from '@/components/ToastProvider';
+
+const XP_PER_CORRECT_READING = 3;
+const DIFFICULTY_ORDER: ReadingDifficulty[] = ['beginner', 'intermediate', 'advanced'];
 
 function normalizeAnswer(value: string): string {
   return value.trim().toLocaleLowerCase();
 }
 
-function wordToBraille(word: string, charToBraille: Record<string, { dots: number[] }>): string {
+function wordToBraille(word: string, charToBraille: Record<string, { dots: number[]; category?: string }>): string {
   return word
-    .toUpperCase()
     .split('')
-    .map((char) => charToBraille[char])
-    .filter((entry): entry is { dots: number[] } => Boolean(entry))
-    .map((entry) => dotsToBrailleUnicode(entry.dots))
+    .map((char) => {
+      if (char === ' ') return '   ';
+      const entry = charToBraille[char.toUpperCase()] ?? charToBraille[char];
+      if (!entry) return '';
+      if (entry.category === 'number') return getBrailleDisplayText(entry as never);
+      return dotsToBrailleUnicode(entry.dots);
+    })
     .join('');
+}
+
+function getNextIndex(currentIndex: number, total: number): number {
+  if (total <= 1) return 0;
+  const offset = Math.floor(Math.random() * (total - 1)) + 1;
+  return (currentIndex + offset) % total;
+}
+
+function getDifficultyFromPerformance(totalAnswered: number, correctAnswers: number, streak: number): ReadingDifficulty {
+  const accuracy = totalAnswered > 0 ? correctAnswers / totalAnswered : 0;
+
+  if (totalAnswered >= 12 && accuracy >= 0.85 && streak >= 3) return 'advanced';
+  if (totalAnswered >= 5 && accuracy >= 0.7) return 'intermediate';
+  return 'beginner';
+}
+
+function getDifficultyLabel(t: ReturnType<typeof useLocaleContext>['t'], difficulty: ReadingDifficulty): string {
+  if (difficulty === 'advanced') return t.read.advanced;
+  if (difficulty === 'intermediate') return t.read.intermediate;
+  return t.read.beginner;
 }
 
 export default function ReadPage() {
   const { standardId, standard, t } = useLocaleContext();
-  const words = useMemo(() => getReadingPracticeWords(standardId), [standardId]);
+  const { progress, addXP } = useProgress();
+  const { show } = useToast();
+  const allWords = useMemo(() => getReadingPracticeWords(standardId), [standardId]);
+  const [difficulty, setDifficulty] = useState<ReadingDifficulty>('beginner');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answer, setAnswer] = useState('');
   const [submitted, setSubmitted] = useState(false);
@@ -29,7 +60,18 @@ export default function ReadPage() {
   const [totalAnswered, setTotalAnswered] = useState(0);
   const [correctAnswers, setCorrectAnswers] = useState(0);
   const [currentStreak, setCurrentStreak] = useState(0);
-  const currentWord = words[currentIndex];
+  const [sessionXP, setSessionXP] = useState(0);
+
+  const currentWords = useMemo(
+    () => allWords.filter((entry) => entry.difficulty === difficulty),
+    [allWords, difficulty]
+  );
+  const currentWord = currentWords[currentIndex] ?? currentWords[0] ?? allWords[0];
+  const nextSuggestedDifficulty = difficulty === 'beginner'
+    ? 'intermediate'
+    : difficulty === 'intermediate'
+      ? 'advanced'
+      : null;
 
   const brailleWord = useMemo(
     () => wordToBraille(currentWord.answer, standard.charToBraille),
@@ -37,24 +79,47 @@ export default function ReadPage() {
   );
 
   const isCorrect = submitted && normalizeAnswer(answer) === normalizeAnswer(currentWord.answer);
-
   const accuracy = totalAnswered > 0 ? Math.round((correctAnswers / totalAnswered) * 100) : 0;
+
+  function goToNextWord() {
+    setCurrentIndex((index) => getNextIndex(index, currentWords.length));
+    setAnswer('');
+    setSubmitted(false);
+    setShowAnswer(false);
+  }
+
+  function maybeAdvanceDifficulty(nextTotalAnswered: number, nextCorrectAnswers: number, nextStreak: number) {
+    const nextDifficulty = getDifficultyFromPerformance(nextTotalAnswered, nextCorrectAnswers, nextStreak);
+    if (DIFFICULTY_ORDER.indexOf(nextDifficulty) > DIFFICULTY_ORDER.indexOf(difficulty)) {
+      setDifficulty(nextDifficulty);
+      setCurrentIndex(0);
+      setAnswer('');
+      setSubmitted(false);
+      setShowAnswer(false);
+      show(`${t.read.difficultyUp}: ${getDifficultyLabel(t, nextDifficulty)}`, 'success');
+    }
+  }
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitted) return;
-    const correct = normalizeAnswer(answer) === normalizeAnswer(currentWord.answer);
-    setTotalAnswered((count) => count + 1);
-    setCorrectAnswers((count) => count + (correct ? 1 : 0));
-    setCurrentStreak((count) => (correct ? count + 1 : 0));
-    setSubmitted(true);
-  }
 
-  function handleNext() {
-    setCurrentIndex((index) => (index + 1) % words.length);
-    setAnswer('');
-    setSubmitted(false);
-    setShowAnswer(false);
+    const correct = normalizeAnswer(answer) === normalizeAnswer(currentWord.answer);
+    const nextTotalAnswered = totalAnswered + 1;
+    const nextCorrectAnswers = correctAnswers + (correct ? 1 : 0);
+    const nextStreak = correct ? currentStreak + 1 : 0;
+
+    setTotalAnswered(nextTotalAnswered);
+    setCorrectAnswers(nextCorrectAnswers);
+    setCurrentStreak(nextStreak);
+    setSubmitted(true);
+    maybeAdvanceDifficulty(nextTotalAnswered, nextCorrectAnswers, nextStreak);
+
+    if (correct) {
+      addXP(XP_PER_CORRECT_READING);
+      setSessionXP((xp) => xp + XP_PER_CORRECT_READING);
+      show(`+${XP_PER_CORRECT_READING} XP`, 'xp');
+    }
   }
 
   return (
@@ -65,7 +130,19 @@ export default function ReadPage() {
       </div>
 
       <section className="surface rounded-xl p-6 md:p-8" aria-labelledby="reading-practice-title">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6" aria-label="Reading practice stats">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+          <div>
+            <p className="section-kicker mb-2" id="reading-practice-title">{t.read.continuousLabel}</p>
+            <p className="text-xs text-[#66706d]">{t.read.readyForNext}</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <span className="dot-chip !text-[11px]">{t.read.overallLevel} {progress.level}</span>
+            <span className="dot-chip !text-[11px]">{t.read.practiceStreak} {progress.streak}</span>
+            <span className="dot-chip !text-[11px]">{t.read.sessionXP} {sessionXP}</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6" aria-label="Reading practice stats">
           <div className="rounded-lg border border-[rgba(235,226,207,0.08)] bg-[rgba(235,226,207,0.03)] px-4 py-3">
             <p className="text-[11px] uppercase tracking-[0.12em] text-[#66706d]">{t.read.totalAnswered}</p>
             <p className="text-lg font-semibold text-[#f3eee5] tabular-nums">{totalAnswered}</p>
@@ -82,14 +159,24 @@ export default function ReadPage() {
             <p className="text-[11px] uppercase tracking-[0.12em] text-[#66706d]">{t.read.accuracy}</p>
             <p className="text-lg font-semibold text-[#f3eee5] tabular-nums">{accuracy}%</p>
           </div>
+          <div className="rounded-lg border border-[rgba(235,226,207,0.08)] bg-[rgba(235,226,207,0.03)] px-4 py-3">
+            <p className="text-[11px] uppercase tracking-[0.12em] text-[#66706d]">{t.read.difficulty}</p>
+            <p className="text-lg font-semibold text-[#d6a85b]">{getDifficultyLabel(t, difficulty)}</p>
+          </div>
         </div>
+
+        {nextSuggestedDifficulty && (
+          <p className="text-xs text-[#66706d] mb-6">
+            {t.read.nextDifficultyHint} <span className="text-[#a9b0a9]">{getDifficultyLabel(t, nextSuggestedDifficulty)}</span>
+          </p>
+        )}
 
         <div className="flex items-center justify-between gap-4 mb-6">
           <div>
-            <p className="section-kicker mb-2" id="reading-practice-title">{t.read.prompt}</p>
-            <p className="text-xs text-[#66706d]">
-              {t.read.progress} {currentIndex + 1} / {words.length}
-            </p>
+            <p className="section-kicker mb-2">{t.read.prompt}</p>
+            {submitted && isCorrect && (
+              <p className="text-xs text-[#75b7a8]">+{XP_PER_CORRECT_READING} {t.read.xpEarned}</p>
+            )}
           </div>
           <button
             type="button"
@@ -103,7 +190,7 @@ export default function ReadPage() {
         <div
           className="rounded-xl border border-[rgba(235,226,207,0.08)] bg-[rgba(235,226,207,0.03)] px-5 py-8 mb-6"
           role="group"
-          aria-label={t.read.prompt}
+          aria-label={`${t.read.prompt}: ${getDifficultyLabel(t, difficulty)}`}
         >
           <p className="text-center text-4xl md:text-5xl tracking-[0.2em] text-[#f3eee5] leading-tight">
             {brailleWord}
@@ -132,7 +219,7 @@ export default function ReadPage() {
             </button>
             <button
               type="button"
-              onClick={handleNext}
+              onClick={goToNextWord}
               className="quiet-button px-4 py-2.5 rounded-md text-sm font-semibold focus-visible:outline-2 focus-visible:outline-[#f0c979]"
             >
               {t.read.next}
